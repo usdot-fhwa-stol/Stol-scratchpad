@@ -6,6 +6,23 @@ enum {
    SYNTAX_ERR = -2,
    NO_MEM_ERR = -3,
    KEYWORD_ERR = -4,
+
+   NO_BLCLOSE_ERR = -15000,
+   NO_BLOPEN_ERR,
+   BLOPEN_ERR,
+   BLCLOSE_ERR,
+   NO_BRCLOSE_ERR,
+   NO_BROPEN_ERR, //NO BRACKET where expected
+   BROPEN_ERR, //BRACKET where not expected
+   BRCLOSE_ERR, //BRACKET where not expected
+   UNDEFINED_TYPE_ERR,
+   NO_IDENTIFIER_ERR,
+   NO_SEMICOLON_ERR,
+   REDEFINED_ERR,
+   PREDEFINED_ERR,
+   NO_STATEMENT_ERR,
+   NO_POUND_ENDIF_ERR,
+   
 };
 
 #endif

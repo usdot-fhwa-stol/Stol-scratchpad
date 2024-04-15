@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include "stol-utils.h"
 #include "stol-errors.h"
+#include "eval.h"
+#include "directive.h"
 
 char ros_name[1024];
 char outbuf[1024];
@@ -96,23 +98,150 @@ int isValidKeyword(char *outbuf)
     return 0;
 }
 
-int get_token(char *outbuf, const char *inbuf, int len, int *token)
+static char filename[1024] = "";
+static uint line = 1, col = 1;
+int get_line(char *outbuf, char *inbuf, int len)
 {
    int i;
    char *origout = outbuf;
+
    outbuf[0] = 0;
-   *token = 0;
    for (i = 0; i < len; i++) {
-      if (inbuf[i] == ' ' || inbuf[i] == '\n' || inbuf[i] == '\r' || inbuf[i] == '\v' || inbuf[i] == '\b' || inbuf[i] == '\a')
-        continue;
+      *outbuf++ = inbuf[i];
+      col++;
+      if (inbuf[i] == '\n' || inbuf[i] == '\r') {
+         line++;
+         if (i < len -1) {
+             if ((inbuf[i+1] == '\r' || inbuf[i+1] == '\n') && inbuf[i+1] != inbuf[i]) {
+                //Some editor adds \n\r or \r\n as a line
+                //Some editor adds jusr '\n' or '\r'
+                *outbuf++ = inbuf[i++];
+             }
+         }
+         break; 
+      }
+   }
+   *outbuf = 0;
+   return i;
+}
+int get_token(char *outbuf, const const char *inbuf, int len, token_t *token)
+{
+   int i, backslash = 0, comment = 0, line_comment = 0, j = 0;
+   char *origout = outbuf;
+   const char *nextbuf = inbuf;
+
+   outbuf[0] = 0;
+   memset(token, 0, sizeof(token[0]));
+   for (i = 0; i < len; i++) {
+      if(inbuf[i] == '\n' || inbuf[i] == '\v') {
+         line++;
+         line_comment = 0;
+         col = 1;
+         continue;
+      }
+      if(inbuf[i] == '\r') {
+         col = 1;
+         continue;
+      }
+      if(inbuf[i] == '\b') {
+         if(col > 1)
+            col--;
+         continue;
+      }
+      if (inbuf[i] == ' ' || inbuf[i] == '\t') {
+         col++; 
+         continue;
+      }
+      if (inbuf[i] == '\a')
+         continue;
+      if (inbuf[i] == '/') {
+         if (i < len -1) {
+            if (inbuf[i+1] == '*') {
+               comment = 1;
+               i++;
+               continue;
+            }
+
+         }
+         if (backslash == 0)
+             backslash = 1;
+         else {
+             line_comment = 1;
+             backslash = 0;
+         }
+         
+      } else
+         backslash = 0;
+      if (comment == 1) {
+         if (inbuf[i] == '*') {
+            if (i < len -1 && inbuf[i+1] == '/') {
+               comment = 0;
+               i++;
+               continue;
+            }
+         }
+         continue;
+      }
+      if (line_comment == 1)
+          continue;
       break;
    }
    if (i >= len)
       return i;
+   token->line = line;
+   token->col = col;
+   comment = 0;
+   backslash = 0;
+   line_comment = 0;
    for (; i < len; i++) {
-      if (inbuf[i] == ' ' || inbuf[i] == '\n' || inbuf[i] == '\r' || inbuf[i] == '\v' || inbuf[i] == '\b' || inbuf[i] == '\a')
+      if (comment == 1) {
+         if (inbuf[i] == '*') {
+            if (i < len-1) {
+               if (inbuf[i+1] == '/') {
+                  comment = 0;
+                  continue;
+               } else
+                  continue;
+            }
+         }
+      } else if (line_comment == 1) {
+         if (inbuf[i] == '\n' || inbuf[i] == '\r' || inbuf[i] == '\v') {
+             line_comment = 0;
+             i++;
+             if (j > 0) // got some token
+                break;
+         }
+         continue;
+      } else if (inbuf[i] == '/') {
+         if (i < len -1) {
+            if (inbuf[i+1] == '*') {
+               comment = 1;
+               backslash = 0;
+               i++;
+               continue;
+            } 
+            if (inbuf[i+1] == '/') {
+               line_comment = 1;
+               i++; //go to the next line to eat all the comment on this line
+            }
+         } 
+      } else if (line_comment == 1) {
+         if (inbuf[i] == '\n' || inbuf[i] == '\r' || inbuf[i] == '\v') {
+             line_comment = 0;
+             i++;
+             if (j >0)
+                break;
+         }
+      }
+      if (comment == 1)
+         continue;
+      if (line_comment == 1 && j > 0)
+         continue;
+      if (inbuf[i] == ' ' || inbuf[i] == '\t' || inbuf[i] == '\n' || inbuf[i] == '\r' || inbuf[i] == '\v' || inbuf[i] == '\b' || inbuf[i] == '\a')
          break;
       *outbuf++ = inbuf[i];
+      j++;
+      col++;
       if (inbuf[i] == '+' || inbuf[i] == '-' || inbuf[i] == '<' || inbuf[i] == '>' || inbuf[i] == '=' || inbuf[i] == '&' || inbuf[i] == '|') {
          if (i < len -1) {
             if(inbuf[i] == inbuf[i+1]) {
@@ -141,83 +270,83 @@ int get_token(char *outbuf, const char *inbuf, int len, int *token)
    }
    *outbuf = 0;
    if (strcmp(origout, ";") == 0)
-      *token = SEMICOLON;
+      token->id = SEMICOLON;
    else if (strcmp(origout, ",") == 0)
-      *token = COMMA;
+      token->id = COMMA;
    else if (strcmp(origout, "==") == 0)
-      *token = EQUAL_TO;
+      token->id = EQUAL_TO;
    else if (strcmp(origout, "=") == 0)
-      *token = ASSIGNMENT;
+      token->id = ASSIGNMENT;
    else if (strcmp(origout, "++") == 0)
-      *token = PLUSPLUS;
+      token->id = PLUSPLUS;
    else if (strcmp(origout, "--") == 0)
-      *token = MINUSMINUS;
+      token->id = MINUSMINUS;
    else if (strcmp(origout, "&&") == 0)
-      *token = LOGICAL_AND;
+      token->id = LOGICAL_AND;
    else if (strcmp(origout, "&") == 0)
-      *token = AMPERSAND;
+      token->id = AMPERSAND;
    else if (strcmp(origout, "|") == 0)
-      *token = OR;
+      token->id = OR;
    else if (strcmp(origout, "||") == 0)
-      *token = LOGICAL_OR;
+      token->id = LOGICAL_OR;
    else if (strcmp(origout, "<<") == 0)
-      *token = LEFT_SHIFT;
+      token->id = LEFT_SHIFT;
    else if (strcmp(origout, ">>") == 0)
-      *token = RIGHT_SHIFT;
+      token->id = RIGHT_SHIFT;
    else if (strcmp(origout, "+") == 0)
-      *token = PLUS;
+      token->id = PLUS;
    else if (strcmp(origout, "-") == 0)
-      *token = MINUS;
+      token->id = MINUS;
    else if (strcmp(origout, "*") == 0)
-      *token = STAR;
+      token->id = STAR;
    else if (strcmp(origout, "/") == 0)
-      *token = DIVISION;
+      token->id = DIVISION;
    else if (strcmp(origout, "%") == 0)
-      *token = MODULO;
+      token->id = MODULO;
    else if (strcmp(origout, "!") == 0)
-      *token = NOT;
+      token->id = NOT;
    else if (strcmp(origout, "^") == 0)
-      *token = XOR;
+      token->id = XOR;
    else if (strcmp(origout, "~") == 0)
-      *token = TOGGLE;
+      token->id = TOGGLE;
    else if (strcmp(origout, "(") == 0)
-      *token = BRACKET_OPEN;
+      token->id = BRACKET_OPEN;
    else if (strcmp(origout, ")") == 0)
-      *token = BRACKET_CLOSE;
+      token->id = BRACKET_CLOSE;
    else if (strcmp(origout, "{") == 0)
-      *token = BLOCK_BEGIN;
+      token->id = BLOCK_BEGIN;
    else if (strcmp(origout, "}") == 0)
-      *token = BLOCK_END;
+      token->id = BLOCK_END;
    else if (strcmp(origout, "[") == 0)
-      *token = SQUARE_OPEN;
+      token->id = SQUARE_OPEN;
    else if (strcmp(origout, "]") == 0)
-      *token = SQUARE_CLOSE;
+      token->id = SQUARE_CLOSE;
    else if (strcmp(origout, "unsigned") == 0)
-      *token = UNSIGNED;
+      token->id = UNSIGNED;
    else if (strcmp(origout, "int") == 0)
-      *token = INTEGER;
+      token->id = INTEGER;
    else if (strcmp(origout, "long") == 0)
-      *token = LONG;
+      token->id = LONG;
    else if (strcmp(origout, "char") == 0)
-      *token = CHAR;
+      token->id = CHAR;
    else if (strcmp(origout, "float") == 0)
-      *token = FLOAT;
+      token->id = FLOAT;
    else if (strcmp(origout, "double") == 0)
-      *token = DOUBLE;
+      token->id = DOUBLE;
    else if (strcmp(origout, "union") == 0)
-      *token = UNION;
+      token->id = UNION;
    else if (strcmp(origout, "struct") == 0)
-      *token = STRUCT;
+      token->id = STRUCT;
    else if (strcmp(origout, "typedef") == 0)
-      *token = TYPEDEF;
+      token->id = TYPEDEF;
    else if (strcmp(origout, "static") == 0)
-      *token = STATIC;
+      token->id = STATIC;
    else if (isValidNumber(origout))
-      *token = NUMBER;
+      token->id = NUMBER;
    else if (isValidId(origout))
-      *token = IDENTIFIER;
+      token->id = IDENTIFIER;
    else if (isValidKeyword(origout))
-      *token = KEYWORD;
+      token->id = KEYWORD;
    
    return i;
 }
@@ -227,7 +356,7 @@ int parse_typedef_int(char *buf, int len, int *outlen, token_t *out)
    int i;
    token_t *next, *orig = out;
    int lenEaten = 0;
-   int token;
+   token_t token;
    
    i = get_token(outbuf, buf, len, &token);
    if (i <= 0)
@@ -241,6 +370,10 @@ int parse_typedef_int(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
         return -1;
       next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
          free(next);
@@ -269,6 +402,10 @@ int parse_typedef_int(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = COMMA;
+         next->line = token.line;
+         next->col = token.col;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -284,6 +421,10 @@ int parse_typedef_int(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -305,7 +446,7 @@ int parse_typedef_uint(char *buf, int len, int *outlen, token_t *out)
    int i;
    token_t *next, *orig = out;
    int lenEaten = 0;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -320,6 +461,10 @@ int parse_typedef_uint(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
         return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
          free(next);
@@ -346,6 +491,8 @@ int parse_typedef_uint(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = COMMA;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -357,6 +504,8 @@ int parse_typedef_uint(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -377,7 +526,7 @@ int parse_typedef_uint16(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -390,6 +539,8 @@ int parse_typedef_uint16(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
         return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
          free(next);
@@ -416,6 +567,8 @@ int parse_typedef_uint16(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = COMMA;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -427,6 +580,8 @@ int parse_typedef_uint16(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -442,7 +597,7 @@ int parse_typedef_int16(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -457,6 +612,8 @@ int parse_typedef_int16(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
         return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
          free(next);
@@ -483,6 +640,8 @@ int parse_typedef_int16(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = COMMA;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -497,6 +656,8 @@ int parse_typedef_int16(char *buf, int len, int *outlen, token_t *out)
             return NO_MEM_ERR;
          }
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -512,7 +673,7 @@ int parse_typedef_enum_block(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    do {
       i = get_token(outbuf, buf, len, &token);
@@ -527,6 +688,8 @@ int parse_typedef_enum_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = BLOCK_END;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -541,6 +704,8 @@ int parse_typedef_enum_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = IDENTIFIER;
+         next->line = token.line;
+         next->col = token.col;
          next->value = calloc(1, strlen(outbuf)+1);
          if (next->value == NULL) {
             free(next);
@@ -561,6 +726,8 @@ int parse_typedef_enum_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -580,7 +747,7 @@ int parse_typedef_enum_identifier(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -595,6 +762,8 @@ int parse_typedef_enum_identifier(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -613,7 +782,7 @@ int parse_typedef_enum(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    i = get_token(outbuf, buf, len, &token);
    if (i <= 0)
@@ -627,6 +796,8 @@ int parse_typedef_enum(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
           free(next);
@@ -651,6 +822,8 @@ int parse_typedef_enum(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -672,7 +845,7 @@ int parse_typedef_union_block(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    do {
       i = get_token(outbuf, buf, len, &token);
@@ -687,6 +860,8 @@ int parse_typedef_union_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = BLOCK_END;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -701,6 +876,8 @@ int parse_typedef_union_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = IDENTIFIER;
+         next->line = token.line;
+         next->col = token.col;
          next->value = calloc(1, strlen(outbuf)+1);
          if (next->value == NULL) {
             free(next);
@@ -721,6 +898,8 @@ int parse_typedef_union_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -742,7 +921,7 @@ int parse_typedef_union_identifier(char *buf, int len, int *outlen, token_t *out
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -755,6 +934,8 @@ int parse_typedef_union_identifier(char *buf, int len, int *outlen, token_t *out
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -772,7 +953,7 @@ int parse_typedef_union(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    i = get_token(outbuf, buf, len, &token);
    if (i <= 0)
@@ -784,6 +965,8 @@ int parse_typedef_union(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, i+1);
       if (next->value == NULL) {
           free(next);
@@ -804,6 +987,8 @@ int parse_typedef_union(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -821,7 +1006,7 @@ int parse_typedef_struct_block(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    do {
       i = get_token(outbuf, buf, len, &token);
@@ -836,6 +1021,8 @@ int parse_typedef_struct_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = BLOCK_END;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -850,6 +1037,8 @@ int parse_typedef_struct_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = IDENTIFIER;
+         next->line = token.line;
+         next->col = token.col;
          next->value = calloc(1, strlen(outbuf)+1);
          if (next->value == NULL) {
             free(next);
@@ -870,6 +1059,8 @@ int parse_typedef_struct_block(char *buf, int len, int *outlen, token_t *out)
          if (!next) 
             return -1;
          next->id = SEMICOLON;
+         next->line = token.line;
+         next->col = token.col;
          while(out->next)
             out = out->next;
          out->next = next;
@@ -889,7 +1080,7 @@ int parse_typedef_struct_identifier(char *buf, int len, int *outlen, token_t *ou
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    outlen[0] = 0;
    i = get_token(outbuf, buf, len, &token);
@@ -902,6 +1093,8 @@ int parse_typedef_struct_identifier(char *buf, int len, int *outlen, token_t *ou
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -918,7 +1111,7 @@ int parse_typedef_struct(char *buf, int len, int *outlen, token_t *out)
    int i;
    int lenEaten = 0;
    token_t *next, *orig = out;
-   int token;
+   token_t token;
    
    i = get_token(outbuf, buf, len, &token);
    if (i <= 0)
@@ -930,18 +1123,14 @@ int parse_typedef_struct(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = IDENTIFIER;
+      next->line = token.line;
+      next->col = token.col;
       next->value = calloc(1, strlen(outbuf)+1);
       if (next->value == NULL) {
          free(next);
          return NO_MEM_ERR;
       }
       strcpy((char *) next->value, outbuf);
-      next->value = calloc(1, i+1);
-      if (next->value == NULL) {
-          free(next);
-          return NO_MEM_ERR;
-       }
-       strcpy((char *) next->value, outbuf);
        while(out->next)
           out = out->next;
        out->next = next;
@@ -957,6 +1146,8 @@ int parse_typedef_struct(char *buf, int len, int *outlen, token_t *out)
       if (!next) 
          return -1;
       next->id = BLOCK_BEGIN;
+      next->line = token.line;
+      next->col = token.col;
       while(out->next)
           out = out->next;
        out->next = next;
@@ -976,7 +1167,7 @@ int parse_enum(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
        i = get_token(outbuf, buf, len, &token);
@@ -992,6 +1183,8 @@ int parse_enum(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_BEGIN;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           i = parse_enum_block(buf, len, outlen, orig);
@@ -1010,6 +1203,8 @@ int parse_enum(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = COMMA;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1024,6 +1219,8 @@ int parse_enum(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1038,6 +1235,8 @@ int parse_enum(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = IDENTIFIER;
+          next->line = token.line;
+          next->col = token.col;
           next->value = calloc(1, strlen(outbuf)+1);
           if (next->value == NULL) {
              free(next);
@@ -1059,7 +1258,7 @@ int parse_struct_identifier(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
     
     i = get_token(outbuf, buf, len, &token);
     if (i <= 0) {
@@ -1074,6 +1273,8 @@ int parse_struct_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = BLOCK_BEGIN;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
           out = out->next;
        i = parse_struct_block(buf, len, outlen, orig);
@@ -1093,6 +1294,8 @@ int parse_struct_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
           out = out->next;
        return lenEaten;
@@ -1105,7 +1308,7 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
        i = get_token(outbuf, buf, len, &token);
@@ -1121,6 +1324,8 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_BEGIN;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1140,6 +1345,8 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = STAR;
+       next->line = token.line;
+       next->col = token.col;
           while(out->next)
           out = out->next;
           out->next = next;
@@ -1154,6 +1361,8 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1168,6 +1377,8 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1182,6 +1393,8 @@ int parse_struct(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = IDENTIFIER;
+          next->line = token.line;
+          next->col = token.col;
           next->value = calloc(1, strlen(outbuf)+1);
           if (next->value == NULL) {
              free(next);
@@ -1202,7 +1415,7 @@ int parse_struct_block(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
 
     i = get_token(outbuf, buf, len, &token);
@@ -1225,6 +1438,8 @@ int parse_struct_block(char *buf, int len, int *outlen, token_t *out)
           if (next == NULL)
               return NO_MEM_ERR;
           next->id = BLOCK_END;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1239,6 +1454,8 @@ int parse_struct_block(char *buf, int len, int *outlen, token_t *out)
           outlen[0] += i;
           lenEaten += i;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1253,6 +1470,8 @@ int parse_struct_block(char *buf, int len, int *outlen, token_t *out)
           outlen[0] += i;
           lenEaten += i;
           next->id = COMMA;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1267,6 +1486,8 @@ int parse_struct_block(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_BEGIN;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           i = parse_struct_block(buf, len, outlen, orig);
@@ -1294,7 +1515,7 @@ int parse_enum_block(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
 
     i = get_token(outbuf, buf, len, &token);
@@ -1317,6 +1538,8 @@ int parse_enum_block(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1332,6 +1555,8 @@ int parse_enum_block(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = IDENTIFIER;
+          next->line = token.line;
+          next->col = token.col;
           next->value = calloc(1, strlen(outbuf)+1);
           if (next->value == NULL) {
              free(next);
@@ -1357,6 +1582,8 @@ int parse_enum_block(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_END;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1370,6 +1597,8 @@ int parse_enum_block(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+       next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1385,7 +1614,7 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while( len > 0) {
        i = get_token(outbuf, buf, len, &token);
@@ -1402,6 +1631,8 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = INTEGER;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           continue;
@@ -1415,6 +1646,8 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = IDENTIFIER;
+          next->line = token.line;
+          next->col = token.col;
           next->value = calloc(1, strlen(outbuf)+1);
           if (next->value == NULL) {
              free(next);
@@ -1435,6 +1668,8 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = COMMA;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1449,6 +1684,8 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_END;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1463,6 +1700,8 @@ int parse_enum_identifier_equal(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           return lenEaten;
@@ -1476,7 +1715,7 @@ int parse_enum_identifier(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
     
     i = get_token(outbuf, buf, len, &token);
     if (i <= 0) {
@@ -1492,6 +1731,8 @@ int parse_enum_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
           out = out->next;
        return parse_enum_identifier_equal(buf, len, outlen, orig);
@@ -1506,6 +1747,8 @@ int parse_enum_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
           out = out->next;
        return  lenEaten; 
@@ -1519,6 +1762,8 @@ int parse_enum_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
           out = out->next;
        return lenEaten;
@@ -1530,7 +1775,7 @@ int parse_typedef(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -1544,6 +1789,8 @@ int parse_typedef(char *buf, int len, int *outlen, token_t *out)
            return NO_MEM_ERR;
        }
        next->id = LONG;
+       next->line = token.line;
+       next->col = token.col;
        next->value = 0;
        next->next = NULL;
        while(out->next)
@@ -1582,6 +1829,8 @@ int parse_typedef(char *buf, int len, int *outlen, token_t *out)
            return -1;
        }
        next->id = STRUCT;
+       next->line = token.line;
+       next->col = token.col;
        next->value = 0;
        next->next = NULL;
        while(out->next)
@@ -1604,6 +1853,8 @@ int parse_typedef(char *buf, int len, int *outlen, token_t *out)
            return -1;
        }
        next->id = UNION;
+       next->line = token.line;
+       next->col = token.col;
        next->value = 0;
        next->next = NULL;
        while(out->next)
@@ -1624,21 +1875,21 @@ int parse_block(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-    int token;
+    token_t token;
 
 
     i = get_token(outbuf, buf, len, &token);
     if (i <= 0) {
        return SYNTAX_ERR;
     }
-    if (token == BLOCK_END)
+    if (token.id == BLOCK_END)
       return SYNTAX_ERR; // empty block
     do {     
        i = get_token(outbuf, buf, len, &token);
        if (i <= 0) {
           return SYNTAX_ERR;
        }
-       if (token == BLOCK_END) {
+       if (token.id == BLOCK_END) {
           buf += i;
           len -= i;
           outlen[0] += i;
@@ -1647,6 +1898,8 @@ int parse_block(char *buf, int len, int *outlen, token_t *out)
           if (next == NULL)
               return NO_MEM_ERR;
           next->id = BLOCK_END;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1670,21 +1923,21 @@ int parse_bracket_expr(char *buf, int len, int *outlen, token_t *out)
     token_t *next, *orig = out;
     int i;
     int lenEaten = 0;
-    int token;
+    token_t token;
 
 
     i = get_token(outbuf, buf, len, &token);
     if (i <= 0) {
        return SYNTAX_ERR;
     }
-    if (token == BLOCK_END)
+    if (token.id == BLOCK_END)
       return SYNTAX_ERR; // empty block
     do {     
        i = get_token(outbuf, buf, len, &token);
        if (i <= 0) {
           return SYNTAX_ERR;
        }
-       if (token == BRACKET_CLOSE) {
+       if (token.id == BRACKET_CLOSE) {
           buf += i;
           len -= i;
           outlen[0] += i;
@@ -1693,6 +1946,8 @@ int parse_bracket_expr(char *buf, int len, int *outlen, token_t *out)
           if (next == NULL)
               return NO_MEM_ERR;
           next->id = BRACKET_CLOSE;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1705,7 +1960,9 @@ int parse_bracket_expr(char *buf, int len, int *outlen, token_t *out)
        next = (token_t *) calloc(1, sizeof(token_t));
        if (next == NULL)
            return NO_MEM_ERR;
-       next->id = token;
+       next->id = token.id;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
            free(next); 
@@ -1725,7 +1982,7 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
        int i = get_token(outbuf, buf, len, &token);
@@ -1741,6 +1998,8 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = COMMA;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1751,7 +2010,7 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           }
           return i;
        }
-       if (token == BRACKET_OPEN) {
+       if (token.id == BRACKET_OPEN) {
           // matches '('
           len -= i;
           len -= i;
@@ -1763,10 +2022,13 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BRACKET_OPEN;;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
-          i = parse_bracket_expr(buf, len, outlen, orig);
+          out = out->next;
+          i = parse_bracket_expr(buf, len, outlen, next);
           if (i > 0) {
              lenEaten += i;
              buf += i;
@@ -1776,7 +2038,7 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           }
           return i;
        }
-       if (token == BRACKET_CLOSE) {
+       if (token.id == BRACKET_CLOSE) {
           // matches ')'
           len -= i;
           len -= i;
@@ -1788,12 +2050,14 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BRACKET_CLOSE;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
           continue;
        }
-       if (token == IDENTIFIER || token == INTEGER || token == CHAR || token == SHORT || token == UNSIGNED || token == FLOAT || token == DOUBLE || token == COMMA) {
+       if (token.id == IDENTIFIER || token.id == INTEGER || token.id == CHAR || token.id == SHORT || token.id == UNSIGNED || token.id == FLOAT || token.id == DOUBLE || token.id == COMMA) {
           // matches ')'
           len -= i;
           len -= i;
@@ -1804,13 +2068,15 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           next = (token_t *) calloc(1, sizeof(token_t));
           if (!next)
              return NO_MEM_ERR;
-          next->id = token;
+          next->id = token.id;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
           continue;
        }
-       if (token == SEMICOLON) {
+       if (token.id == SEMICOLON) {
           len -= i;
           outlen[0] += i;
           lenEaten += i;
@@ -1820,6 +2086,8 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = SEMICOLON;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1835,6 +2103,8 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = BLOCK_BEGIN;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
              out = out->next;
           out->next = next;
@@ -1857,6 +2127,8 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = ASSIGNMENT;
+          next->line = token.line;
+          next->col = token.col;
           while(out->next)
             out = out->next;
           out->next = next;
@@ -1872,6 +2144,8 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           if (!next)
              return NO_MEM_ERR;
           next->id = NUMBER;
+          next->line = token.line;
+          next->col = token.col;
           next->value = (token_t *) calloc(1, strlen(outbuf)+1);
           if (!next)
              return NO_MEM_ERR;
@@ -1888,7 +2162,9 @@ int parse_int_identifier(char *buf, int len, int *outlen, token_t *out)
           next = (token_t *) calloc(1, sizeof(token_t));
           if (!next)
              return NO_MEM_ERR;
-          next->id = token;
+          next->id = token.id;
+          next->line = token.line;
+          next->col = token.col;
           next->value = (token_t *) calloc(1, strlen(outbuf)+1);
           if (!next)
              return NO_MEM_ERR;
@@ -1906,7 +2182,7 @@ int parse_int(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -1920,6 +2196,8 @@ int parse_int(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -1945,7 +2223,7 @@ int parse_long_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     while(len > 0) { 
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
@@ -1960,6 +2238,8 @@ int parse_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -1979,6 +2259,8 @@ int parse_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -1994,6 +2276,8 @@ int parse_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2009,6 +2293,8 @@ int parse_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2029,7 +2315,7 @@ int parse_long(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2043,6 +2329,8 @@ int parse_long(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2064,6 +2352,8 @@ int parse_long(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = LONG;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2080,7 +2370,7 @@ int parse_uint_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -2096,6 +2386,8 @@ int parse_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2111,6 +2403,8 @@ int parse_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2126,6 +2420,8 @@ int parse_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2141,6 +2437,8 @@ int parse_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2160,7 +2458,7 @@ int parse_uint(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2174,6 +2472,8 @@ int parse_uint(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2195,7 +2495,7 @@ int parse_ulong_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
 
     while(len > 0) {
@@ -2212,6 +2512,8 @@ int parse_ulong_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2227,6 +2529,8 @@ int parse_ulong_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2242,6 +2546,8 @@ int parse_ulong_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2257,6 +2563,8 @@ int parse_ulong_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2276,7 +2584,7 @@ int parse_ulong(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2290,6 +2598,8 @@ int parse_ulong(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2311,6 +2621,8 @@ int parse_ulong(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = LONG;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2326,7 +2638,7 @@ int parse_long64_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -2342,6 +2654,8 @@ int parse_long64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2357,6 +2671,8 @@ int parse_long64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2372,6 +2688,8 @@ int parse_long64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2387,6 +2705,8 @@ int parse_long64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2407,7 +2727,7 @@ int parse_long64(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2421,6 +2741,8 @@ int parse_long64(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2441,7 +2763,7 @@ int parse_ulong64_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -2457,6 +2779,8 @@ int parse_ulong64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2472,6 +2796,8 @@ int parse_ulong64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2487,6 +2813,8 @@ int parse_ulong64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2502,6 +2830,8 @@ int parse_ulong64_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2521,7 +2851,7 @@ int parse_ulong64(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2535,6 +2865,8 @@ int parse_ulong64(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2556,7 +2888,7 @@ int parse_int16_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
    
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -2572,6 +2904,8 @@ int parse_int16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2587,6 +2921,8 @@ int parse_int16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2602,6 +2938,8 @@ int parse_int16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2617,6 +2955,8 @@ int parse_int16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2636,7 +2976,7 @@ int parse_int16(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2650,6 +2990,8 @@ int parse_int16(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2671,7 +3013,7 @@ int parse_uint16_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
@@ -2686,6 +3028,8 @@ int parse_uint16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2701,6 +3045,8 @@ int parse_uint16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2716,6 +3062,8 @@ int parse_uint16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2731,6 +3079,8 @@ int parse_uint16_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2750,7 +3100,7 @@ int parse_uint16(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2764,6 +3114,8 @@ int parse_uint16(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2784,7 +3136,7 @@ int parse_int8_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     do {
     int i = get_token(outbuf, buf, len, &token);
@@ -2800,6 +3152,8 @@ int parse_int8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2815,6 +3169,8 @@ int parse_int8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2830,6 +3186,8 @@ int parse_int8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2845,6 +3203,8 @@ int parse_int8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next->value)
           return NO_MEM_ERR;
@@ -2864,7 +3224,7 @@ int parse_int8(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2878,6 +3238,8 @@ int parse_int8(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -2903,7 +3265,7 @@ int parse_uint8_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -2919,6 +3281,8 @@ int parse_uint8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2934,6 +3298,8 @@ int parse_uint8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2949,6 +3315,8 @@ int parse_uint8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -2964,6 +3332,8 @@ int parse_uint8_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -2984,7 +3354,7 @@ int parse_uint8(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -2998,6 +3368,8 @@ int parse_uint8(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3019,7 +3391,7 @@ int parse_float_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
@@ -3035,6 +3407,8 @@ int parse_float_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3050,6 +3424,8 @@ int parse_float_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3065,6 +3441,8 @@ int parse_float_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3080,6 +3458,8 @@ int parse_float_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -3100,7 +3480,7 @@ int parse_float(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3114,6 +3494,8 @@ int parse_float(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3134,7 +3516,7 @@ int parse_double_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     while(len > 0) {
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
@@ -3149,6 +3531,8 @@ int parse_double_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3164,6 +3548,8 @@ int parse_double_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3179,6 +3565,8 @@ int parse_double_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = ASSIGNMENT;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3194,6 +3582,8 @@ int parse_double_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = NUMBER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = (token_t *) calloc(1, strlen(outbuf)+1);
        if (!next)
           return NO_MEM_ERR;
@@ -3213,7 +3603,7 @@ int parse_double(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3227,6 +3617,8 @@ int parse_double(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3248,7 +3640,7 @@ int parse_unsigned(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3262,6 +3654,8 @@ int parse_unsigned(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = INTEGER;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3277,6 +3671,8 @@ int parse_unsigned(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = LONG;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3292,6 +3688,8 @@ int parse_unsigned(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3313,7 +3711,7 @@ int parse_static_int_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3327,6 +3725,8 @@ int parse_static_int_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3342,6 +3742,8 @@ int parse_static_int_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3357,7 +3759,7 @@ int parse_static_uint_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3371,6 +3773,8 @@ int parse_static_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3386,6 +3790,8 @@ int parse_static_uint_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3400,7 +3806,7 @@ int parse_static_int(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3414,6 +3820,8 @@ int parse_static_int(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3434,7 +3842,7 @@ int parse_static_uint(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3448,6 +3856,8 @@ int parse_static_uint(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3469,7 +3879,7 @@ int parse_static_unsigned(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3483,6 +3893,8 @@ int parse_static_unsigned(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = INTEGER;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3498,6 +3910,8 @@ int parse_static_unsigned(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3518,7 +3932,7 @@ int parse_static_long_identifier(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3532,6 +3946,8 @@ int parse_static_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = COMMA;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3547,6 +3963,8 @@ int parse_static_long_identifier(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = SEMICOLON;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3561,7 +3979,7 @@ int parse_static_long(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3575,6 +3993,8 @@ int parse_static_long(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3596,7 +4016,7 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
 {
     token_t *next, *orig = out;
     int lenEaten = 0;
-   int token;
+    token_t token;
     int i = get_token(outbuf, buf, len, &token);
     if (i <= 0)
        return i;
@@ -3610,6 +4030,8 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = INTEGER;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3625,6 +4047,8 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = LONG;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3640,6 +4064,8 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = UNSIGNED;
+       next->line = token.line;
+       next->col = token.col;
        while(out->next)
             out = out->next;
        out->next = next;
@@ -3655,6 +4081,8 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
        if (!next)
           return NO_MEM_ERR;
        next->id = INTEGER;
+       next->line = token.line;
+       next->col = token.col;
 
        next->next = (token_t *) calloc(1, sizeof(token_t));
        if (!next->next) {
@@ -3662,6 +4090,8 @@ int parse_static(char *buf, int len, int *outlen, token_t *out)
           return NO_MEM_ERR;
        }
        next->next->id = IDENTIFIER;
+       next->line = token.line;
+       next->col = token.col;
        next->value = calloc(1, strlen(outbuf)+1);
        if (next->value == NULL) {
           free(next);
@@ -3683,7 +4113,7 @@ int parse_statement(char *buf, int len, int *outlen, token_t **outpp)
 {
     int i;
     int lenEaten = 0;
-    int token;
+    token_t token;
     token_t *stmt = *outpp, *next, *prev;
 
     while(len > 0) {
@@ -3831,7 +4261,7 @@ int parse_statement(char *buf, int len, int *outlen, token_t **outpp)
            }
            return i;
        }
-       stmt->id = token;
+       stmt->id = token.id;
        stmt->value = calloc(1, strlen(outbuf) +1);
        if (stmt->value == NULL) { 
            prev->next = NULL;
@@ -3840,7 +4270,7 @@ int parse_statement(char *buf, int len, int *outlen, token_t **outpp)
            return NO_MEM_ERR;
        }
        strcpy((char *) stmt->value, outbuf); 
-       if (token == SEMICOLON)
+       if (token.id == SEMICOLON)
           return lenEaten;
     }
     return SYNTAX_ERR;
@@ -3849,7 +4279,7 @@ int parse_declaration(char *buf, int len, int *outlen, token_t **outpp)
 {
     int i;
     int lenEaten = 0;
-   int token;
+    token_t token;
 
     i = get_token(outbuf, buf, len, &token);
     token_t *stmt = *outpp;
@@ -4089,6 +4519,8 @@ void freeToken(token_t *t)
      token_t *next  = t->next;
      if (t->value)
         free(t->value);
+     if (t->filename)
+        free(t->filename);
      free(t);
      t = next;
    }
@@ -4110,12 +4542,114 @@ void freeStatement(statement_t *stmt)
   } 
 }
 
-int parse(char *buf, int len)
+int parse_expr(char *buf, int len, statement_t **outpp)
+{
+  int outlen = 0, eval = 0, result;
+  statement_t *orst, *stmt = *outpp, *newst = NULL;
+  token_t t = {0};
+  char *nextbuf = buf;
+
+  orst = *outpp;
+  while(len > 0) {
+     int i = get_token(outbuf, buf, len, &t);
+     if (strcmp(outbuf, "#if") == 0) {
+        char *nextbuf = buf;
+        i = ifAction(buf, len, stmt->filename, &nextbuf, &orst);
+        if (i > 0) {
+           buf += i;
+           len -= i;
+           continue;
+        } 
+     }
+     if (strcmp(outbuf, "#ifdef") == 0) {
+        i = ifdefAction(buf, len, stmt->filename, &nextbuf, outpp);
+        if (i > 0) {
+           buf += i;
+           len -= i;
+           continue;
+        } 
+     }
+     if (strcmp(outbuf, "#ifndef") == 0) {
+        i = ifndefAction(buf, len, stmt->filename, &nextbuf, outpp);
+        if (i > 0) {
+           buf += i;
+           len -= i;
+           continue;
+        } 
+     }
+     if (t.id == BRACKET_OPEN) {
+        buf += i;
+        len -= i;
+        if (stmt == NULL) {
+           newst = stmt =  (statement_t *) calloc(1, sizeof(statement_t));
+           if (stmt == NULL)
+              return NO_MEM_ERR;
+           *outpp = stmt;
+        }
+        orst = stmt;
+        while(stmt->next)
+           stmt = stmt->next;
+        if (stmt->id) {
+           newst = stmt->next = (statement_t *) calloc(1, sizeof(statement_t));
+           if (stmt->next == NULL) {
+              return NO_MEM_ERR;
+           } 
+           stmt = stmt->next;
+        }
+        stmt->token = (token_t *) calloc(1, sizeof(token_t));
+        if (stmt->token == NULL) {
+           if (newst)
+              free(newst);
+           return NO_MEM_ERR;
+        }
+        stmt->token[0].id = t.id;
+        i = parse_bracket_expr(buf, len, &outlen, stmt->token);
+        if (i > 0) {
+          buf += i;
+          len -= i;
+          eval = eval_bracket_expr(stmt->token, outpp, &result);
+        }
+        continue;
+     } //if BRACKET_OPEN
+     if (t.id == LOGICAL_OR || t.id == LOGICAL_AND || t.id == NOT) {
+        buf += i;
+        len -= i;
+        i = parse_expr(buf, len, outpp);
+        if (i > 0) {
+          int result = 0;
+          buf += i;
+          len -= i;
+          i = eval_expr(outpp, &result);
+          if (i >= 0) {
+             if (t.id == LOGICAL_OR)
+             {
+                if (result)
+                   eval = 1;
+             } else if(t.id == LOGICAL_AND) {
+                if (eval && result)
+                   eval = 1;
+                 else
+                   eval = 0;
+             } else if (t.id == NOT) 
+                   eval = !result;
+          }
+          else {
+             printf("Evaluation error in file %s at line %d column %d", stmt->filename, stmt->token->line, stmt->token->col);
+          }
+        } else {
+          printf("PArse error in file %s at line %d column %d", stmt->token->filename, stmt->token->line, stmt->token->col);
+        }
+     }
+  }
+  return 0;
+}
+
+int parse(char *buf, int len, char *filename, statement_t **outpp)
 {
     int outlen = 0, i;
-    statement_t *root = NULL, *stmt = NULL, *st;
+    statement_t *root = *outpp, *stmt = *outpp, *st;
     token_t   *t;
-   int token;
+    token_t token;
 
     do {
        i = get_token(outbuf, buf, len, &token);
@@ -4139,8 +4673,17 @@ int parse(char *buf, int len)
              break;
           }
           st->token = t;
-          if (root == NULL)
+          st->filename = (char *) malloc(strlen(filename) + 1);
+          if (st->filename == NULL) {
+             freeToken(st->token);
+             free(st);
+             *outpp = NULL;
+             break;
+          }
+          if (root == NULL) {
              root = st;
+             *outpp = st;
+          }
           else
              stmt->next = st;
           stmt = st;  

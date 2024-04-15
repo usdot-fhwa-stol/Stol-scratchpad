@@ -16,6 +16,7 @@ enum {
   INT64,
   UINT64,
   UNSIGNED,
+  SIGNED,
   NUMBER, // 14
   EXPRESSION,
   IDENTIFIER, //16
@@ -55,25 +56,56 @@ enum {
   BRACKET_CLOSE,
   SQUARE_OPEN,
   SQUARE_CLOSE,
+  POUND_IF,
+  POUND_ELSE,
+  POUND_ELSEIF,
+  POUND_ENDIF,
 };
+
+enum {
+  SC_LOCAL=1,
+  SC_STATIC,
+  SC_GLOBAL,
+};
+
 typedef unsigned int uint;
 typedef struct token {
    uint   id;
+   char   *filename;
+   uint   line, col;
    void * value;
    struct token *next;
 } token_t;
 #if 1
 typedef struct statement {
    uint   id;
+   char *filename;
    void   *value;
    token_t *token;
+   unsigned int  block[1];
    struct statement *next;
 } statement_t;
+
+struct name {
+  char *myname;
+  struct name *next;
+};
+typedef struct vardef {
+   struct name *name[256];
+} vardef_t;
+struct compile {
+   vardef_t *statdef;
+   vardef_t  *macdef;
+   vardef_t  *bldef;
+   vardef_t  *gldef;
+};
 #endif
+int get_token(char *outbuf, const char *inbuf, int len, token_t *token);
+int get_line(char *outbuf, char *buf, int len);
 int isValidNumber(char *outbuf);
 int isValidInt(char *outbuf);
 int isValidId(char *outbuf);
-int parse(char *buf, int len);
+int parse(char *buf, int len, char *filename, statement_t **outpp);
 int parse_typedef_int(char *buf, int len, int *outlen, token_t *out);
 int parse_typedef_long(char *buf, int len, int *outlen, token_t *out);
 int parse_typedef_struct(char *buf, int len, int *outlen, token_t *out);
@@ -131,4 +163,5 @@ int parse_static_double(char *buf, int len, int *outlen, token_t *out);
 int parse_static_double_identifier(char *buf, int len, int *outlen, token_t *out);
 int parse_static_float(char *buf, int len, int *outlen, token_t *out);
 int parse_static_float_identifier(char *buf, int len, int *outlen, token_t *out);
+void errorPrint(token_t *, int);
 #endif

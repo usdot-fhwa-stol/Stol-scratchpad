@@ -21,6 +21,6 @@ int main()
   inner();
   mytest.i  =1;
   mytest.histest.j  =1;
-  printf("My int %d", mytest.i);
+  printf("My int %d, %d", mytest.i, sizeof("myname"));
   return 0;
 }
