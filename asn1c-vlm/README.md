@@ -122,7 +122,8 @@ after each stage of operation:
     <parser> => <fixer> => <compiler> => print              (-P)
     <parser> => <fixer> => <compiler> => save-compiled      [default]
 
-
+File asn1c_C.c has been modified - a comment has been added to indicate where
+the type long anf unsigned long could be changed to int16, uint16, int8 and uint8 - Suman Manandhar
 -- 
 Lev Walkin
 vlm@lionet.info
