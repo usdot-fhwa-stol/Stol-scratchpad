@@ -9,7 +9,12 @@
 char ros_name[1024];
 char outbuf[1024];
 
+//keyword is an array of strings that are actually keywords in C language
 char *keywords[] = {"static", "extern", "include", "define", "int", "long", "char", "short", "{", "}", "[", "]", "+", "-", "%", "/", "*", "--", "++", "<", "<=", ">" , ">="};
+
+//isValidId() - returns 1 if the input string is a valid C identifer, else 0.
+//param:
+//outbuf - a pointer to a null terminated string of bytes
 int isValidId(char *outbuf)
 {
    if (strlen(outbuf) == 0)
@@ -21,6 +26,9 @@ int isValidId(char *outbuf)
    return 1;
 }
 
+//isValidInt() - returns 1 if the string is an integer else 0
+//param:
+//  outbuf - pointer to a string
 int isValidInt(char *outbuf)
 {
    int i, flag, decimal = 0, negative = 0, positive = 0;
@@ -51,6 +59,10 @@ int isValidInt(char *outbuf)
    }
    return 1;
 }
+
+//isValidNumber() - If the input string is a number, it returns 1 or else 0
+// param:
+//  outbuf - pointer to a null terminated string
 int isValidNumber(char *outbuf)
 {
    int i, flag, decimal = 0, negative = 0, positive = 0;
